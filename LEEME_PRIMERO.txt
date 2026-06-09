@@ -1,0 +1,19 @@
+TRACKER DE UNIVERSIDADES - PAQUETE COMPLETO v1.1
+
+Contenido:
+- universidad_ranking_tracker.py: script principal.
+- requirements.txt: librerías necesarias.
+- README.md: guía completa de instalación y uso.
+- data/top_200_universidades_QS_2026_con_ARG_LATAM_recomendadas.xlsx: Excel base con Top 200 QS + recomendadas AR/LATAM.
+- fuentes/qs_2026_rankings.xlsx: planilla fuente de QS 2026 usada como base.
+- ejemplos/test_all_sheets.xlsx: archivo pequeño de prueba del modo --all-sheets.
+
+Uso rápido en Windows PowerShell:
+1) pip install -r requirements.txt
+2) $env:OPENALEX_API_KEY="TU_API_KEY"
+3) python universidad_ranking_tracker.py --input data/top_200_universidades_QS_2026_con_ARG_LATAM_recomendadas.xlsx --output universidades_tracker_actualizado.xlsx --all-sheets --target-year 2025
+
+Importante:
+- El script NO actualiza automáticamente QS/THE/ARWU en tiempo real.
+- Sí actualiza métricas académicas desde ROR + OpenAlex.
+- Si agregás universidades nuevas en cualquier hoja con columnas reconocibles, --all-sheets las procesa automáticamente.
