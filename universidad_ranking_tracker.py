@@ -886,7 +886,7 @@ def write_dataframe_sheet(wb, sheet_name: str, df: pd.DataFrame, title: str, not
     # Ajuste simple de anchos, con límites razonables.
     for col_idx, col_name in enumerate(df.columns, start=1):
         series = df[col_name].astype(str).head(200) if len(df) else []
-        max_len = max([len(str(col_name))] + [len(x) for x in series]) if len(df) else len(str(col_name))
+        max_len = max([len(str(col_name))] + [len(str(x)) for x in series]) if len(df) else len(str(col_name))
         width = min(max(max_len + 2, 10), 42)
         if "url" in str(col_name).lower() or "maps" in str(col_name).lower() or "api" in str(col_name).lower():
             width = 32
