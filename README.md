@@ -15,6 +15,7 @@ Versión actual: **1.1**. Incluye soporte para `--all-sheets`, que procesa autom
 - Coordenadas de ROR/OpenAlex, si están disponibles.
 - Hoja `Tracker_OpenAlex_ROR`.
 - Hoja `Historial_metricas` para comparar ejecuciones.
+- Hojas maestras `Instituciones`, `Rankings_Historicos`, `Metricas_OpenAlex`, `Matches_Pendientes` y `Control_Calidad`.
 - Procesamiento de una hoja específica o de todas las hojas con `--all-sheets`.
 - Eliminación automática de duplicados entre hojas por nombre+país y, después, por ROR/OpenAlex ID.
 
@@ -144,3 +145,13 @@ El scraper no intenta eludir Cloudflare, paywalls, logins ni restricciones técn
 
 - `universidades_tracker_actualizado.xlsx`: Excel enriquecido.
 - `universidades_tracker_cache.json`: caché local de respuestas para acelerar futuras ejecuciones.
+
+## Modelo maestro del Excel
+
+Además de conservar las hojas originales, el Excel de salida agrega:
+
+- `Instituciones`: catálogo normalizado con nombre original, país, ROR, OpenAlex, homepage, coordenadas y estado del match.
+- `Rankings_Historicos`: ranking base conservado desde el Excel de entrada, listo para combinar con rankings oficiales recolectados.
+- `Metricas_OpenAlex`: métricas académicas en formato analítico.
+- `Matches_Pendientes`: instituciones sin match ROR/OpenAlex o con confianza baja para revisión manual.
+- `Control_Calidad`: conteos de faltantes, duplicados y alertas de calidad.

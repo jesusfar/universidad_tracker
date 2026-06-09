@@ -69,6 +69,11 @@ ROR_BASE_V1 = "https://api.ror.org/organizations"
 
 TRACKER_SHEET = "Tracker_OpenAlex_ROR"
 HISTORY_SHEET = "Historial_metricas"
+INSTITUTIONS_SHEET = "Instituciones"
+RANKINGS_HISTORY_SHEET = "Rankings_Historicos"
+OPENALEX_METRICS_SHEET = "Metricas_OpenAlex"
+PENDING_MATCHES_SHEET = "Matches_Pendientes"
+QUALITY_SHEET = "Control_Calidad"
 
 SOURCE_SHEET_COL = "tracker_hoja_origen"
 SOURCE_HEADER_ROW_COL = "tracker_fila_encabezado"
@@ -824,6 +829,220 @@ def make_history(df: pd.DataFrame, name_col: str, country_col: Optional[str], ra
     return pd.DataFrame(cols, columns=history_columns)
 
 
+def df_column(df: pd.DataFrame, column: Optional[str], default: Any = None) -> pd.Series:
+    if column and column in df.columns:
+        return df[column]
+    return pd.Series([default] * len(df), index=df.index)
+
+
+def make_institutions_master(df: pd.DataFrame, name_col: str, country_col: Optional[str]) -> pd.DataFrame:
+    columns = [
+        "institution_key",
+        "universidad_original",
+        "pais_original",
+        "pais_alpha2_detectado",
+        "ror_id",
+        "ror_nombre",
+        "ror_pais",
+        "ror_country_code",
+        "openalex_id",
+        "openalex_nombre",
+        "openalex_country_code",
+        "openalex_tipo",
+        "homepage",
+        "latitud",
+        "longitud",
+        "match_status",
+        "match_confidence_ror",
+    ]
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    out = pd.DataFrame({
+        "institution_key": [build_dedupe_key(name, country) for name, country in zip(df_column(df, name_col), df_column(df, country_col))],
+        "universidad_original": df_column(df, name_col),
+        "pais_original": df_column(df, country_col),
+        "pais_alpha2_detectado": df_column(df, "pais_alpha2_detectado"),
+        "ror_id": df_column(df, "ror_id"),
+        "ror_nombre": df_column(df, "ror_nombre"),
+        "ror_pais": df_column(df, "ror_pais"),
+        "ror_country_code": df_column(df, "ror_country_code"),
+        "openalex_id": df_column(df, "openalex_id"),
+        "openalex_nombre": df_column(df, "openalex_nombre"),
+        "openalex_country_code": df_column(df, "openalex_country_code"),
+        "openalex_tipo": df_column(df, "openalex_tipo"),
+        "homepage": df_column(df, "openalex_homepage"),
+        "latitud": df_column(df, "openalex_latitud").combine_first(df_column(df, "ror_latitud")),
+        "longitud": df_column(df, "openalex_longitud").combine_first(df_column(df, "ror_longitud")),
+        "match_status": [
+            "ok" if ror == "ok" and openalex == "ok" else "revisar"
+            for ror, openalex in zip(df_column(df, "ror_status_match"), df_column(df, "openalex_status_match"))
+        ],
+        "match_confidence_ror": df_column(df, "ror_score"),
+    })
+    return out.drop_duplicates(subset=["institution_key", "ror_id", "openalex_id"], keep="first")
+
+
+def make_rankings_history_master(df: pd.DataFrame, name_col: str, country_col: Optional[str], rank_col: Optional[str]) -> pd.DataFrame:
+    columns = [
+        "source",
+        "edition",
+        "universidad",
+        "pais",
+        "ranking_base",
+        "hoja_origen",
+        "ror_id",
+        "openalex_id",
+        "observacion",
+    ]
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+    ranking_series = df_column(df, rank_col).combine_first(df_column(df, "ranking_base_del_excel"))
+    out = pd.DataFrame({
+        "source": ["excel_base"] * len(df),
+        "edition": [None] * len(df),
+        "universidad": df_column(df, name_col),
+        "pais": df_column(df, country_col),
+        "ranking_base": ranking_series,
+        "hoja_origen": df_column(df, SOURCE_SHEET_COL),
+        "ror_id": df_column(df, "ror_id"),
+        "openalex_id": df_column(df, "openalex_id"),
+        "observacion": ["Ranking conservado desde el Excel de entrada."] * len(df),
+    })
+    return out
+
+
+def make_openalex_metrics_master(df: pd.DataFrame, name_col: str, country_col: Optional[str], target_year: int) -> pd.DataFrame:
+    columns = [
+        "universidad",
+        "pais",
+        "ror_id",
+        "openalex_id",
+        "openalex_nombre",
+        "works_total",
+        "citas_total",
+        "h_index",
+        "i10_index",
+        "mean_citedness_2yr",
+        f"publicaciones_{target_year}",
+        f"citas_{target_year}",
+        f"publicaciones_{target_year - 1}",
+        f"citas_{target_year - 1}",
+        "delta_publicaciones_pct",
+        "delta_citas_pct",
+        "openalex_actualizado",
+        "openalex_url",
+        "works_api_url",
+    ]
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame({
+        "universidad": df_column(df, name_col),
+        "pais": df_column(df, country_col),
+        "ror_id": df_column(df, "ror_id"),
+        "openalex_id": df_column(df, "openalex_id"),
+        "openalex_nombre": df_column(df, "openalex_nombre"),
+        "works_total": df_column(df, "openalex_works_total"),
+        "citas_total": df_column(df, "openalex_citas_total"),
+        "h_index": df_column(df, "openalex_h_index"),
+        "i10_index": df_column(df, "openalex_i10_index"),
+        "mean_citedness_2yr": df_column(df, "openalex_2yr_mean_citedness"),
+        f"publicaciones_{target_year}": df_column(df, f"openalex_publicaciones_{target_year}"),
+        f"citas_{target_year}": df_column(df, f"openalex_citas_{target_year}"),
+        f"publicaciones_{target_year - 1}": df_column(df, f"openalex_publicaciones_{target_year - 1}"),
+        f"citas_{target_year - 1}": df_column(df, f"openalex_citas_{target_year - 1}"),
+        "delta_publicaciones_pct": df_column(df, "openalex_delta_publicaciones_pct"),
+        "delta_citas_pct": df_column(df, "openalex_delta_citas_pct"),
+        "openalex_actualizado": df_column(df, "openalex_actualizado"),
+        "openalex_url": df_column(df, "openalex_url"),
+        "works_api_url": df_column(df, "openalex_works_api_url"),
+    })
+
+
+def make_pending_matches(df: pd.DataFrame, name_col: str, country_col: Optional[str]) -> pd.DataFrame:
+    columns = [
+        "universidad",
+        "pais",
+        "ror_status_match",
+        "ror_score",
+        "ror_id",
+        "ror_nombre",
+        "openalex_status_match",
+        "openalex_id",
+        "openalex_nombre",
+        "motivo_revision",
+    ]
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows: List[Dict[str, Any]] = []
+    for _, row in df.iterrows():
+        reasons: List[str] = []
+        if row.get("ror_status_match") != "ok":
+            reasons.append("sin_match_ror")
+        if row.get("openalex_status_match") != "ok":
+            reasons.append("sin_match_openalex")
+        score = row.get("ror_score")
+        if pd.notna(score):
+            try:
+                if float(score) < 0.8:
+                    reasons.append("score_ror_bajo")
+            except (TypeError, ValueError):
+                pass
+        if not reasons:
+            continue
+        rows.append({
+            "universidad": row.get(name_col),
+            "pais": row.get(country_col) if country_col else None,
+            "ror_status_match": row.get("ror_status_match"),
+            "ror_score": row.get("ror_score"),
+            "ror_id": row.get("ror_id"),
+            "ror_nombre": row.get("ror_nombre"),
+            "openalex_status_match": row.get("openalex_status_match"),
+            "openalex_id": row.get("openalex_id"),
+            "openalex_nombre": row.get("openalex_nombre"),
+            "motivo_revision": ", ".join(reasons),
+        })
+    return pd.DataFrame(rows, columns=columns)
+
+
+def make_quality_control(df: pd.DataFrame, name_col: str, country_col: Optional[str], rank_col: Optional[str]) -> pd.DataFrame:
+    checks: List[Dict[str, Any]] = []
+
+    def add_check(check: str, severity: str, count: int, note: str) -> None:
+        checks.append({
+            "check": check,
+            "severity": severity,
+            "count": int(count),
+            "note": note,
+            "timestamp_utc": now_iso(),
+        })
+
+    if df.empty:
+        add_check("dataset_vacio", "error", 1, "No hay universidades procesadas.")
+        return pd.DataFrame(checks)
+
+    add_check("filas_procesadas", "info", len(df), "Total de universidades en el tracker enriquecido.")
+    add_check("sin_ror_id", "warning", int(df_column(df, "ror_id").isna().sum()), "Instituciones sin identificador ROR.")
+    add_check("sin_openalex_id", "warning", int(df_column(df, "openalex_id").isna().sum()), "Instituciones sin identificador OpenAlex.")
+    ranking_series = df_column(df, rank_col).combine_first(df_column(df, "ranking_base_del_excel"))
+    add_check("sin_ranking_base", "info", int(ranking_series.isna().sum()), "Instituciones sin ranking base en el Excel de entrada.")
+    if country_col:
+        add_check("sin_pais", "warning", int(df_column(df, country_col).isna().sum()), "Instituciones sin país detectado.")
+    duplicate_keys = [
+        build_dedupe_key(name, country)
+        for name, country in zip(df_column(df, name_col), df_column(df, country_col))
+    ]
+    add_check("duplicados_nombre_pais", "warning", int(pd.Series(duplicate_keys).duplicated().sum()), "Duplicados por nombre normalizado + país.")
+    if "ror_id" in df.columns:
+        add_check("duplicados_ror_id", "warning", int(df["ror_id"].dropna().duplicated().sum()), "Duplicados con el mismo ROR ID.")
+    if "openalex_id" in df.columns:
+        add_check("duplicados_openalex_id", "warning", int(df["openalex_id"].dropna().duplicated().sum()), "Duplicados con el mismo OpenAlex ID.")
+    pending = make_pending_matches(df, name_col, country_col)
+    add_check("matches_pendientes", "warning", len(pending), "Instituciones que requieren revisión manual de match.")
+    return pd.DataFrame(checks)
+
+
 def read_existing_history(output_path: Path) -> pd.DataFrame:
     if not output_path.exists():
         return pd.DataFrame()
@@ -916,7 +1135,48 @@ def write_output_workbook(
     else:
         history_df = new_history
 
+    institutions_df = make_institutions_master(tracker_df, name_col, country_col)
+    rankings_history_df = make_rankings_history_master(tracker_df, name_col, country_col, rank_col)
+    openalex_metrics_df = make_openalex_metrics_master(tracker_df, name_col, country_col, target_year)
+    pending_matches_df = make_pending_matches(tracker_df, name_col, country_col)
+    quality_df = make_quality_control(tracker_df, name_col, country_col, rank_col)
+
     wb = load_workbook(input_path)
+    write_dataframe_sheet(
+        wb,
+        INSTITUTIONS_SHEET,
+        institutions_df,
+        "Instituciones normalizadas",
+        "Catálogo maestro de instituciones con identificadores ROR/OpenAlex y estado de matching.",
+    )
+    write_dataframe_sheet(
+        wb,
+        RANKINGS_HISTORY_SHEET,
+        rankings_history_df,
+        "Rankings históricos",
+        "Ranking base conservado desde el Excel de entrada; puede combinarse con rankings oficiales públicos recolectados por --scrape-rankings.",
+    )
+    write_dataframe_sheet(
+        wb,
+        OPENALEX_METRICS_SHEET,
+        openalex_metrics_df,
+        "Métricas OpenAlex",
+        "Métricas académicas separadas en formato analítico para comparación y reportes.",
+    )
+    write_dataframe_sheet(
+        wb,
+        PENDING_MATCHES_SHEET,
+        pending_matches_df,
+        "Matches pendientes",
+        "Instituciones que requieren revisión manual por falta de ROR/OpenAlex o baja confianza del match.",
+    )
+    write_dataframe_sheet(
+        wb,
+        QUALITY_SHEET,
+        quality_df,
+        "Control de calidad",
+        "Resumen de validaciones de datos, duplicados, faltantes y matches pendientes.",
+    )
     write_dataframe_sheet(
         wb,
         TRACKER_SHEET,
