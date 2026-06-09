@@ -37,9 +37,11 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import io
 import json
 import logging
 import os
+import re
 import sys
 import time
 import unicodedata
@@ -74,6 +76,9 @@ STD_NAME_COL = "tracker_universidad"
 STD_COUNTRY_COL = "tracker_pais"
 STD_RANK_COL = "tracker_ranking_base"
 DEDUP_KEY_COL = "tracker_clave_dedupe"
+
+RANKINGS_SHEET = "Rankings_Oficiales"
+RANKINGS_SOURCES_SHEET = "Fuentes_Rankings"
 
 # Campos útiles y livianos. Reducen tamaño de respuesta y consumo.
 OPENALEX_SELECT = (
@@ -929,13 +934,312 @@ def write_output_workbook(
     wb.save(output_path)
 
 
+RANKING_SOURCE_CONFIG = {
+    "qs": {
+        "name": "QS World University Rankings",
+        "latest_year": 2026,
+        "url_template": "https://www.topuniversities.com/world-university-rankings/{year}",
+        "fallback_url": "https://www.topuniversities.com/world-university-rankings",
+    },
+    "the": {
+        "name": "Times Higher Education World University Rankings",
+        "latest_year": 2026,
+        "url_template": "https://www.timeshighereducation.com/world-university-rankings/{year}/world-ranking",
+        "fallback_url": "https://www.timeshighereducation.com/world-university-rankings/latest/world-ranking",
+    },
+    "arwu": {
+        "name": "ShanghaiRanking ARWU",
+        "latest_year": 2025,
+        "url_template": "https://www.shanghairanking.com/rankings/arwu/{year}",
+        "fallback_url": "https://www.shanghairanking.com/rankings/arwu/2025",
+    },
+}
+
+
+def clean_html_text(value: str) -> str:
+    text = re.sub(r"<script\b.*?</script>", " ", value, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<style\b.*?</style>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = text.replace("&nbsp;", " ").replace("&amp;", "&")
+    text = text.replace("&#39;", "'").replace("&quot;", '"')
+    return " ".join(text.split())
+
+
+def find_public_data_links(base_url: str, html: str) -> List[str]:
+    links: List[str] = []
+    for match in re.finditer(r"""(?:href|src)=["']([^"']+\.(?:json|csv|xlsx|xls)(?:\?[^"']*)?)["']""", html, re.IGNORECASE):
+        url = urllib.parse.urljoin(base_url, match.group(1))
+        if url not in links:
+            links.append(url)
+    return links
+
+
+def flatten_json_records(value: Any) -> List[Dict[str, Any]]:
+    candidates: List[List[Dict[str, Any]]] = []
+
+    def visit(node: Any) -> None:
+        if isinstance(node, list):
+            dict_items = [x for x in node if isinstance(x, dict)]
+            if len(dict_items) >= 3:
+                keys = {normalize_header(k) for item in dict_items[:10] for k in item.keys()}
+                if keys & {"rank", "rank display", "rank_order", "name", "institution", "university", "scores overall"}:
+                    candidates.append(dict_items)
+            for item in node:
+                visit(item)
+        elif isinstance(node, dict):
+            for item in node.values():
+                visit(item)
+
+    visit(value)
+    if not candidates:
+        return []
+    return max(candidates, key=len)
+
+
+def dataframe_from_public_link(session: requests.Session, url: str, timeout: int) -> pd.DataFrame:
+    resp = session.get(url, timeout=timeout)
+    resp.raise_for_status()
+    lower_url = url.lower()
+    content_type = resp.headers.get("content-type", "").lower()
+    if ".json" in lower_url or "json" in content_type:
+        records = flatten_json_records(resp.json())
+        return pd.DataFrame(records)
+    if ".csv" in lower_url or "csv" in content_type:
+        return pd.read_csv(io.BytesIO(resp.content))
+    if any(ext in lower_url for ext in (".xlsx", ".xls")):
+        return pd.read_excel(io.BytesIO(resp.content))
+    return pd.DataFrame()
+
+
+def normalize_scraped_dataframe(df: pd.DataFrame, source: str, ranking_name: str, year: int, source_url: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out = df.copy()
+    out.insert(0, "source", source)
+    out.insert(1, "ranking_name", ranking_name)
+    out.insert(2, "edition_year", year)
+    out.insert(3, "source_url", source_url)
+    out.insert(4, "retrieved_at", now_iso())
+    return out
+
+
+def scrape_arwu_public_html(session: requests.Session, year: int, timeout: int) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    config = RANKING_SOURCE_CONFIG["arwu"]
+    url = config["url_template"].format(year=year)
+    resp = session.get(url, timeout=timeout)
+    status = {
+        "source": "arwu",
+        "ranking_name": config["name"],
+        "edition_year": year,
+        "source_url": url,
+        "status_code": resp.status_code,
+        "status": "ok",
+        "rows": 0,
+        "note": "Tabla pública HTML renderizada por ShanghaiRanking.",
+        "retrieved_at": now_iso(),
+    }
+    resp.raise_for_status()
+    rows: List[Dict[str, Any]] = []
+    for row_html in re.findall(r"<tr\b[^>]*data-v-c5e69b9e[^>]*>(.*?)</tr>", resp.text, flags=re.IGNORECASE | re.DOTALL):
+        rank_match = re.search(r'<div class="ranking"[^>]*>(.*?)</div>', row_html, flags=re.IGNORECASE | re.DOTALL)
+        name_match = re.search(r'<span class="univ-name"[^>]*>(.*?)</span>', row_html, flags=re.IGNORECASE | re.DOTALL)
+        country_match = re.search(r'<div class="location"[^>]*>.*?</img>\s*(.*?)</div>', row_html, flags=re.IGNORECASE | re.DOTALL)
+        link_match = re.search(r'<a href="([^"]+)"[^>]*>\s*<span class="univ-name"', row_html, flags=re.IGNORECASE | re.DOTALL)
+        cells = [clean_html_text(cell) for cell in re.findall(r"<td\b[^>]*>(.*?)</td>", row_html, flags=re.IGNORECASE | re.DOTALL)]
+        if not name_match:
+            continue
+        metric_cells = cells[3:] if len(cells) >= 4 else []
+        record: Dict[str, Any] = {
+            "rank": clean_html_text(rank_match.group(1)) if rank_match else (cells[0] if cells else None),
+            "university": clean_html_text(name_match.group(1)),
+            "country": clean_html_text(country_match.group(1)) if country_match else None,
+            "national_rank": cells[2] if len(cells) >= 3 else None,
+            "institution_url": urllib.parse.urljoin(url, link_match.group(1)) if link_match else None,
+        }
+        for key, value in zip(["total_score", "alumni", "award", "hici", "n_s", "pub", "pcp"], metric_cells):
+            record[key] = value
+        rows.append(record)
+    status["rows"] = len(rows)
+    if rows and len(rows) < 1000:
+        status["status"] = "partial_public_html"
+        status["note"] = (
+            "La página oficial informa paginación, pero el HTML público recuperado contiene "
+            f"{len(rows)} filas renderizadas. No se intenta eludir controles ni usar datos no publicados."
+        )
+    return normalize_scraped_dataframe(pd.DataFrame(rows), "arwu", config["name"], year, url), status
+
+
+def scrape_official_data_url(session: requests.Session, source: str, year: int, data_url: str, timeout: int) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    config = RANKING_SOURCE_CONFIG[source]
+    status = {
+        "source": source,
+        "ranking_name": config["name"],
+        "edition_year": year,
+        "source_url": data_url,
+        "status_code": None,
+        "status": "not_started",
+        "rows": 0,
+        "note": "URL oficial de datos provista explícitamente por el usuario.",
+        "retrieved_at": now_iso(),
+    }
+    try:
+        df = dataframe_from_public_link(session, data_url, timeout)
+    except Exception as exc:
+        status["status"] = "data_url_failed"
+        status["note"] = f"No se pudo leer la URL oficial provista: {exc}"
+        return pd.DataFrame(), status
+    if df.empty:
+        status["status"] = "data_url_empty"
+        status["note"] = "La URL oficial provista respondió, pero no produjo filas tabulares."
+        return pd.DataFrame(), status
+    out = normalize_scraped_dataframe(df, source, config["name"], year, data_url)
+    status["status"] = "ok"
+    status["rows"] = len(out)
+    return out, status
+
+
+def scrape_generic_official_source(session: requests.Session, source: str, year: int, timeout: int) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    config = RANKING_SOURCE_CONFIG[source]
+    url = config["url_template"].format(year=year)
+    status = {
+        "source": source,
+        "ranking_name": config["name"],
+        "edition_year": year,
+        "source_url": url,
+        "status_code": None,
+        "status": "not_started",
+        "rows": 0,
+        "note": "",
+        "retrieved_at": now_iso(),
+    }
+    headers = {
+        "User-Agent": "universidad-ranking-tracker/1.2 (+public official data collection; contact: repository user)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    try:
+        resp = session.get(url, headers=headers, timeout=timeout)
+        status["status_code"] = resp.status_code
+        if resp.status_code == 404 and config.get("fallback_url"):
+            url = str(config["fallback_url"])
+            status["source_url"] = url
+            resp = session.get(url, headers=headers, timeout=timeout)
+            status["status_code"] = resp.status_code
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        status["status"] = "blocked_or_unavailable"
+        status["note"] = f"No se pudo acceder a la página oficial pública: {exc}"
+        return pd.DataFrame(), status
+
+    html = resp.text
+    if "Just a moment" in html and "Cloudflare" in html:
+        status["status"] = "blocked_by_provider"
+        status["note"] = "La fuente oficial respondió con desafío Cloudflare; no se intenta eludirlo."
+        return pd.DataFrame(), status
+
+    frames: List[pd.DataFrame] = []
+    data_links = find_public_data_links(url, html)
+    for link in data_links:
+        try:
+            link_df = dataframe_from_public_link(session, link, timeout)
+            if not link_df.empty:
+                frames.append(normalize_scraped_dataframe(link_df, source, config["name"], year, link))
+        except Exception as exc:
+            logging.debug("No pude leer enlace público %s: %s", link, exc)
+
+    try:
+        html_tables = pd.read_html(io.StringIO(html))
+        for table_df in html_tables:
+            if len(table_df) >= 3:
+                frames.append(normalize_scraped_dataframe(table_df, source, config["name"], year, url))
+    except Exception as exc:
+        logging.debug("No pude leer tablas HTML en %s: %s", url, exc)
+
+    if frames:
+        df = pd.concat(frames, ignore_index=True, sort=False)
+        status["status"] = "ok"
+        status["rows"] = len(df)
+        status["note"] = f"Datos obtenidos desde enlaces/tablas públicos oficiales detectados: {len(data_links)} enlaces."
+        return df, status
+
+    status["status"] = "no_public_table_detected"
+    status["note"] = (
+        "La página oficial respondió, pero no expuso una tabla HTML ni enlaces JSON/CSV/XLSX públicos detectables. "
+        "Si la fuente ofrece descarga oficial manual, pasá ese archivo como Excel base o agregá el enlace oficial."
+    )
+    return pd.DataFrame(), status
+
+
+def parse_ranking_data_urls(value: str) -> Dict[str, str]:
+    urls: Dict[str, str] = {}
+    for item in str(value or "").split(","):
+        if not item.strip():
+            continue
+        if "=" not in item:
+            raise ValueError("Cada --ranking-data-urls debe tener formato fuente=url, por ejemplo qs=https://...")
+        source, url = item.split("=", 1)
+        urls[source.strip().lower()] = url.strip()
+    return urls
+
+
+def scrape_public_rankings(
+    sources: List[str],
+    years: List[int],
+    timeout: int,
+    data_urls: Optional[Dict[str, str]] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    session = requests.Session()
+    data_urls = data_urls or {}
+    frames: List[pd.DataFrame] = []
+    statuses: List[Dict[str, Any]] = []
+    for source in sources:
+        if source not in RANKING_SOURCE_CONFIG:
+            statuses.append({
+                "source": source,
+                "ranking_name": None,
+                "edition_year": None,
+                "source_url": None,
+                "status_code": None,
+                "status": "unknown_source",
+                "rows": 0,
+                "note": f"Fuente no soportada. Usá una de: {', '.join(RANKING_SOURCE_CONFIG)}",
+                "retrieved_at": now_iso(),
+            })
+            continue
+        selected_years = years or [int(RANKING_SOURCE_CONFIG[source]["latest_year"])]
+        for year in selected_years:
+            logging.info("Scraping oficial público: %s %s", source.upper(), year)
+            if source in data_urls:
+                df, status = scrape_official_data_url(session, source, year, data_urls[source], timeout)
+            elif source == "arwu":
+                df, status = scrape_arwu_public_html(session, year, timeout)
+            else:
+                df, status = scrape_generic_official_source(session, source, year, timeout)
+            if not df.empty:
+                frames.append(df)
+            statuses.append(status)
+    ranking_df = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+    status_df = pd.DataFrame(statuses)
+    return ranking_df, status_df
+
+
+def write_rankings_workbook(output_path: Path, ranking_df: pd.DataFrame, status_df: pd.DataFrame) -> None:
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        ranking_df.to_excel(writer, sheet_name=RANKINGS_SHEET, index=False)
+        status_df.to_excel(writer, sheet_name=RANKINGS_SOURCES_SHEET, index=False)
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Actualiza un Excel de universidades con identificadores ROR y métricas OpenAlex.",
+        description="Actualiza métricas OpenAlex/ROR y recolecta rankings oficiales públicos cuando están disponibles.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--input", required=True, help="Ruta del Excel de entrada.")
+    parser.add_argument("--input", help="Ruta del Excel de entrada.")
     parser.add_argument("--output", default="universidades_tracker_actualizado.xlsx", help="Ruta del Excel de salida.")
+    parser.add_argument("--scrape-rankings", action="store_true", help="Recolecta rankings oficiales públicos y genera un Excel independiente.")
+    parser.add_argument("--ranking-sources", default="qs,the,arwu", help="Fuentes a consultar separadas por coma: qs,the,arwu.")
+    parser.add_argument("--ranking-years", default="", help="Años a consultar separados por coma. Si se omite, usa el último año configurado por fuente.")
+    parser.add_argument("--ranking-data-urls", default="", help="URLs oficiales de datos separadas por coma con formato fuente=url. Ejemplo: qs=https://...xlsx,the=https://...json")
+    parser.add_argument("--rankings-output", default="rankings_oficiales_publicos.xlsx", help="Excel de salida para --scrape-rankings.")
     parser.add_argument("--sheet", default="Top 200 QS 2026", help="Hoja a leer del Excel cuando no se usa --all-sheets.")
     parser.add_argument("--all-sheets", action="store_true", help="Procesa automáticamente todas las hojas que tengan columnas reconocibles de universidad.")
     parser.add_argument("--no-dedupe", action="store_true", help="No elimina duplicados entre hojas. Por defecto se deduplica por nombre+país y luego por ROR/OpenAlex.")
@@ -958,6 +1262,21 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     setup_logging(args.verbose)
+
+    if args.scrape_rankings:
+        sources = [s.strip().lower() for s in str(args.ranking_sources).split(",") if s.strip()]
+        years = [int(y.strip()) for y in str(args.ranking_years).split(",") if y.strip()]
+        data_urls = parse_ranking_data_urls(args.ranking_data_urls)
+        output_path = Path(args.rankings_output).expanduser().resolve()
+        ranking_df, status_df = scrape_public_rankings(sources, years, args.timeout, data_urls)
+        logging.info("Escribiendo rankings oficiales públicos: %s", output_path)
+        write_rankings_workbook(output_path, ranking_df, status_df)
+        logging.info("Listo: %s | filas ranking=%s | fuentes=%s", output_path, len(ranking_df), len(status_df))
+        return 0
+
+    if not args.input:
+        logging.error("Falta --input. Para scraping de rankings usá --scrape-rankings.")
+        return 2
 
     input_path = Path(args.input).expanduser().resolve()
     output_path = Path(args.output).expanduser().resolve()

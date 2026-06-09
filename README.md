@@ -95,11 +95,40 @@ python universidad_ranking_tracker.py --input data/top_200_universidades_QS_2026
 python universidad_ranking_tracker.py --input data/top_200_universidades_QS_2026_con_ARG_LATAM_recomendadas.xlsx --output universidades_tracker_actualizado.xlsx --all-sheets --force
 ```
 
+## Scraping de rankings oficiales públicos
+
+El script también puede recolectar datos publicados oficialmente cuando la fuente los expone como HTML, JSON, CSV o Excel público.
+
+```bash
+python universidad_ranking_tracker.py ^
+  --scrape-rankings ^
+  --ranking-sources qs,the,arwu ^
+  --rankings-output rankings_oficiales_publicos.xlsx
+```
+
+El Excel generado incluye:
+
+- `Rankings_Oficiales`: filas extraídas desde datos públicos oficiales.
+- `Fuentes_Rankings`: estado por fuente, URL consultada, cantidad de filas y notas de bloqueo o parcialidad.
+
+Si QS, THE u otra fuente muestran una descarga oficial en el navegador, se puede pasar el enlace directamente:
+
+```bash
+python universidad_ranking_tracker.py ^
+  --scrape-rankings ^
+  --ranking-sources qs ^
+  --ranking-years 2026 ^
+  --ranking-data-urls qs=https://URL_OFICIAL_DEL_ARCHIVO.xlsx
+```
+
+El scraper no intenta eludir Cloudflare, paywalls, logins ni restricciones técnicas. Si una fuente oficial no expone datos tabulares públicos para descarga automática, queda registrado en `Fuentes_Rankings`.
+
 ## Opciones útiles
 
 - `--all-sheets`: procesa todas las hojas con una columna reconocible de universidad.
 - `--no-dedupe`: desactiva la eliminación de duplicados entre hojas.
 - `--sheet "Nombre de hoja"`: procesa solo una hoja.
+- `--scrape-rankings`: genera un Excel independiente con rankings oficiales públicos disponibles.
 
 ## Archivos generados
 

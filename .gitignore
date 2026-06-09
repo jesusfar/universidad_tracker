@@ -15,10 +15,11 @@ env/
 universidades_tracker_actualizado.xlsx
 prueba_tracker.xlsx
 universidades_tracker_cache.json
+rankings_oficiales_publicos.xlsx
+rankings_*_test.xlsx
 
 # Editor/OS files
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
-
