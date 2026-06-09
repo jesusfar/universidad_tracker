@@ -1,0 +1,24 @@
+{
+  "sources": {
+    "qs": {
+      "name": "QS World University Rankings",
+      "latest_year": 2027,
+      "url_template": "https://www.topuniversities.com/world-university-rankings/{year}",
+      "fallback_url": "https://www.topuniversities.com/world-university-rankings",
+      "data_urls": {}
+    },
+    "the": {
+      "name": "Times Higher Education World University Rankings",
+      "latest_year": 2027,
+      "url_template": "https://www.timeshighereducation.com/world-university-rankings/{year}/world-ranking",
+      "fallback_url": "https://www.timeshighereducation.com/world-university-rankings/latest/world-ranking",
+      "data_urls": {}
+    },
+    "arwu": {
+      "name": "ShanghaiRanking ARWU",
+      "latest_year": 2026,
+      "url_template": "https://www.shanghairanking.com/rankings/arwu/{year}",
+      "fallback_url": "https://www.shanghairanking.com/rankings/arwu/2025"
+    }
+  }
+}

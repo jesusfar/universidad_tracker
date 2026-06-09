@@ -1175,10 +1175,47 @@ def parse_ranking_data_urls(value: str) -> Dict[str, str]:
         if not item.strip():
             continue
         if "=" not in item:
-            raise ValueError("Cada --ranking-data-urls debe tener formato fuente=url, por ejemplo qs=https://...")
+            raise ValueError("Cada --ranking-data-urls debe tener formato fuente=url o fuente:año=url.")
         source, url = item.split("=", 1)
         urls[source.strip().lower()] = url.strip()
     return urls
+
+
+def ranking_data_url_for_year(data_urls: Dict[str, str], source: str, year: int) -> Optional[str]:
+    return data_urls.get(f"{source}:{year}") or data_urls.get(source)
+
+
+def load_ranking_config(config_path: Optional[str]) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
+    config = {key: dict(value) for key, value in RANKING_SOURCE_CONFIG.items()}
+    data_urls: Dict[str, str] = {}
+    if not config_path:
+        return config, data_urls
+
+    path = Path(config_path).expanduser().resolve()
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    sources = raw.get("sources", raw)
+    if not isinstance(sources, dict):
+        raise ValueError("El archivo --ranking-config debe contener un objeto JSON o una clave 'sources'.")
+
+    for source, source_config in sources.items():
+        source_key = str(source).strip().lower()
+        if not isinstance(source_config, dict):
+            raise ValueError(f"La configuración de '{source_key}' debe ser un objeto JSON.")
+        merged = dict(config.get(source_key, {}))
+        for key in ("name", "latest_year", "url_template", "fallback_url"):
+            if key in source_config:
+                merged[key] = source_config[key]
+        config[source_key] = merged
+
+        source_data_urls = source_config.get("data_urls") or {}
+        if isinstance(source_data_urls, str):
+            data_urls[source_key] = source_data_urls
+        elif isinstance(source_data_urls, dict):
+            for year, url in source_data_urls.items():
+                data_urls[f"{source_key}:{year}"] = str(url)
+        elif source_data_urls:
+            raise ValueError(f"'data_urls' de '{source_key}' debe ser string u objeto año->url.")
+    return config, data_urls
 
 
 def scrape_public_rankings(
@@ -1208,8 +1245,9 @@ def scrape_public_rankings(
         selected_years = years or [int(RANKING_SOURCE_CONFIG[source]["latest_year"])]
         for year in selected_years:
             logging.info("Scraping oficial público: %s %s", source.upper(), year)
-            if source in data_urls:
-                df, status = scrape_official_data_url(session, source, year, data_urls[source], timeout)
+            data_url = ranking_data_url_for_year(data_urls, source, year)
+            if data_url:
+                df, status = scrape_official_data_url(session, source, year, data_url, timeout)
             elif source == "arwu":
                 df, status = scrape_arwu_public_html(session, year, timeout)
             else:
@@ -1238,7 +1276,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--scrape-rankings", action="store_true", help="Recolecta rankings oficiales públicos y genera un Excel independiente.")
     parser.add_argument("--ranking-sources", default="qs,the,arwu", help="Fuentes a consultar separadas por coma: qs,the,arwu.")
     parser.add_argument("--ranking-years", default="", help="Años a consultar separados por coma. Si se omite, usa el último año configurado por fuente.")
-    parser.add_argument("--ranking-data-urls", default="", help="URLs oficiales de datos separadas por coma con formato fuente=url. Ejemplo: qs=https://...xlsx,the=https://...json")
+    parser.add_argument("--ranking-config", default="", help="JSON opcional para actualizar fuentes, últimos años y URLs oficiales directas sin tocar el código.")
+    parser.add_argument("--ranking-data-urls", default="", help="URLs oficiales de datos separadas por coma con formato fuente=url o fuente:año=url. Ejemplo: qs:2027=https://...xlsx")
     parser.add_argument("--rankings-output", default="rankings_oficiales_publicos.xlsx", help="Excel de salida para --scrape-rankings.")
     parser.add_argument("--sheet", default="Top 200 QS 2026", help="Hoja a leer del Excel cuando no se usa --all-sheets.")
     parser.add_argument("--all-sheets", action="store_true", help="Procesa automáticamente todas las hojas que tengan columnas reconocibles de universidad.")
@@ -1260,13 +1299,17 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    global RANKING_SOURCE_CONFIG
+
     args = parse_args(argv)
     setup_logging(args.verbose)
 
     if args.scrape_rankings:
+        config, config_data_urls = load_ranking_config(args.ranking_config)
+        RANKING_SOURCE_CONFIG = config
         sources = [s.strip().lower() for s in str(args.ranking_sources).split(",") if s.strip()]
         years = [int(y.strip()) for y in str(args.ranking_years).split(",") if y.strip()]
-        data_urls = parse_ranking_data_urls(args.ranking_data_urls)
+        data_urls = {**config_data_urls, **parse_ranking_data_urls(args.ranking_data_urls)}
         output_path = Path(args.rankings_output).expanduser().resolve()
         ranking_df, status_df = scrape_public_rankings(sources, years, args.timeout, data_urls)
         logging.info("Escribiendo rankings oficiales públicos: %s", output_path)
